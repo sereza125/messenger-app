@@ -26,6 +26,9 @@ def init_db():
                     (username TEXT PRIMARY KEY, avatar_color TEXT, online INTEGER DEFAULT 0)''')
     conn.execute('''CREATE TABLE IF NOT EXISTS otp_codes
                     (email TEXT PRIMARY KEY, otp TEXT, expires_at TEXT, verified INTEGER DEFAULT 0)''')
+    conn.execute('''CREATE TABLE IF NOT EXISTS webrtc_signals
+                    (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                     sender TEXT, recipient TEXT, signal_type TEXT, signal_data TEXT, timestamp TEXT)''')
     conn.commit()
     return conn
 
@@ -231,6 +234,33 @@ class ChatHandler(http.server.BaseHTTPRequestHandler):
                 self.send_json({'success': True, 'message': 'Verified', 'userId': username, 'email': email})
             else:
                 self.send_json({'success': False, 'error': message})
+        
+        elif path == '/api/webrtc':
+            action = data.get('action', '')
+            if action == 'send_signal':
+                sender = data.get('sender', '')
+                recipient = data.get('recipient', '')
+                signal_type = data.get('signal_type', '')
+                signal_data = data.get('signal_data', '')
+                ts = datetime.now().isoformat()
+                db.execute("INSERT INTO webrtc_signals (sender,recipient,signal_type,signal_data,timestamp) VALUES (?,?,?,?,?)",
+                          (sender, recipient, signal_type, json.dumps(signal_data), ts))
+                db.commit()
+                self.send_json({'success': True})
+            elif action == 'get_signals':
+                user = data.get('user', '')
+                since = data.get('since', '1970-01-01')
+                rows = db.execute("SELECT sender, signal_type, signal_data, timestamp FROM webrtc_signals WHERE recipient=? AND timestamp > ? ORDER BY timestamp ASC",
+                                 (user, since)).fetchall()
+                signals = [{'sender':r[0], 'signal_type':r[1], 'signal_data':json.loads(r[2]), 'timestamp':r[3]} for r in rows]
+                self.send_json({'signals': signals})
+            elif action == 'cleanup_signals':
+                user = data.get('user', '')
+                db.execute("DELETE FROM webrtc_signals WHERE recipient=?", (user,))
+                db.commit()
+                self.send_json({'success': True})
+            else:
+                self.send_error(400)
         
         else:
             self.send_error(404)
