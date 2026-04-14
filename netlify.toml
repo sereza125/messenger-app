@@ -1,0 +1,12 @@
+[build]
+  publish = "."
+
+[[redirects]]
+  from = "/ws/*"
+  to = "ws://localhost:8769/:splat"
+  status = 200
+
+[[redirects]]
+  from = "/*"
+  to = "/telegram.html"
+  status = 200

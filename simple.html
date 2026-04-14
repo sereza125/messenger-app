@@ -1,0 +1,240 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Messenger</title>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; }
+        body { background: #0f1419; height: 100vh; overflow: hidden; color: #fff; }
+        
+        .login-screen { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: #17212b; display: flex; justify-content: center; align-items: center; z-index: 1000; }
+        .login-box { text-align: center; padding: 40px; }
+        .login-box h1 { color: #fff; font-size: 28px; margin-bottom: 20px; }
+        .login-box input { width: 300px; padding: 15px; background: #242f3d; border: none; border-radius: 10px; color: #fff; font-size: 16px; margin-bottom: 15px; }
+        .login-box button { width: 300px; padding: 15px; background: #2b5278; border: none; border-radius: 10px; color: #fff; font-size: 16px; cursor: pointer; }
+        
+        .app { display: flex; height: 100vh; }
+        .sidebar { width: 300px; background: #17212b; border-right: 1px solid #242f3d; display: flex; flex-direction: column; }
+        .sidebar-header { padding: 15px; border-bottom: 1px solid #242f3d; }
+        .sidebar-header h2 { color: #fff; font-size: 18px; }
+        .online-count { color: #7a8b9a; font-size: 13px; margin-top: 5px; }
+        
+        .chat-list { flex: 1; overflow-y: auto; }
+        .chat-item { padding: 12px 15px; cursor: pointer; border-bottom: 1px solid #242f3d; }
+        .chat-item:hover, .chat-item.active { background: #2b5278; }
+        .chat-item .name { color: #fff; font-weight: 600; }
+        .chat-item .preview { color: #7a8b9a; font-size: 13px; margin-top: 3px; }
+        
+        .main-chat { flex: 1; display: flex; flex-direction: column; }
+        .chat-header { padding: 15px; background: #17212b; border-bottom: 1px solid #242f3d; }
+        .chat-header h3 { color: #fff; }
+        .chat-header .status { color: #7a8b9a; font-size: 13px; }
+        
+        .messages { flex: 1; overflow-y: auto; padding: 15px; }
+        .message { max-width: 70%; padding: 10px 14px; margin-bottom: 8px; border-radius: 12px; word-wrap: break-word; }
+        .message.incoming { background: #182533; margin-right: auto; }
+        .message.outgoing { background: #2b5278; margin-left: auto; }
+        .message .sender { font-size: 12px; color: #6ab2f2; margin-bottom: 3px; }
+        .message .text { font-size: 14px; }
+        .message .time { font-size: 11px; opacity: 0.7; text-align: right; margin-top: 3px; }
+        
+        .input-area { padding: 15px; background: #17212b; border-top: 1px solid #242f3d; display: flex; gap: 10px; }
+        .input-area input { flex: 1; padding: 12px 15px; background: #242f3d; border: none; border-radius: 20px; color: #fff; font-size: 14px; }
+        .input-area button { padding: 12px 20px; background: #2b5278; border: none; border-radius: 20px; color: #fff; cursor: pointer; }
+        
+        .empty-state { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; color: #7a8b9a; }
+        .empty-state h3 { margin-bottom: 10px; }
+        
+        ::-webkit-scrollbar { width: 6px; }
+        ::-webkit-scrollbar-thumb { background: #2b5278; border-radius: 3px; }
+    </style>
+</head>
+<body>
+    <div class="login-screen" id="loginScreen">
+        <div class="login-box">
+            <h1>💬 Messenger</h1>
+            <input type="text" id="usernameInput" placeholder="Ваше имя" maxlength="20">
+            <br>
+            <button onclick="login()">Войти</button>
+        </div>
+    </div>
+
+    <div class="app" id="app" style="display: none;">
+        <div class="sidebar">
+            <div class="sidebar-header">
+                <h2>Чаты</h2>
+                <div class="online-count" id="onlineCount">Онлайн: 0</div>
+            </div>
+            <div class="chat-list" id="chatList">
+                <div class="chat-item active" onclick="selectChat('all')">
+                    <div class="name">📢 Общий чат</div>
+                    <div class="preview">Все сообщения</div>
+                </div>
+            </div>
+        </div>
+
+        <div class="main-chat">
+            <div class="empty-state" id="emptyState">
+                <h3>Выберите чат</h3>
+                <p>Начните общение</p>
+            </div>
+            
+            <div class="chat-header" id="chatHeader" style="display: none;">
+                <h3 id="chatTitle">Чат</h3>
+                <div class="status" id="chatStatus">онлайн</div>
+            </div>
+            
+            <div class="messages" id="messages" style="display: none;"></div>
+            
+            <div class="input-area" id="inputArea" style="display: none;">
+                <input type="text" id="messageInput" placeholder="Сообщение..." onkeypress="if(event.key==='Enter')sendMessage()">
+                <button onclick="sendMessage()">➤</button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const API_URL = window.location.origin;
+        let username = null;
+        let currentChat = 'all';
+        let lastMessageTime = '1970-01-01';
+        let pollInterval;
+        let usersInterval;
+
+        function login() {
+            username = document.getElementById('usernameInput').value.trim();
+            if (!username) return alert('Введите имя!');
+            
+            fetch(`${API_URL}/api/login`, {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({username})
+            }).then(() => {
+                document.getElementById('loginScreen').style.display = 'none';
+                document.getElementById('app').style.display = 'flex';
+                selectChat('all');
+                startPolling();
+            });
+        }
+
+        function selectChat(chat) {
+            currentChat = chat;
+            lastMessageTime = '1970-01-01';
+            document.getElementById('messages').innerHTML = '';
+            
+            document.getElementById('emptyState').style.display = 'none';
+            document.getElementById('chatHeader').style.display = 'block';
+            document.getElementById('messages').style.display = 'block';
+            document.getElementById('inputArea').style.display = 'flex';
+            
+            document.getElementById('chatTitle').textContent = chat === 'all' ? '📢 Общий чат' : chat;
+            
+            // Update active state
+            document.querySelectorAll('.chat-item').forEach(item => {
+                item.classList.remove('active');
+            });
+            event?.target?.classList?.add('active');
+            
+            loadMessages();
+        }
+
+        function startPolling() {
+            pollInterval = setInterval(loadMessages, 1000);
+            usersInterval = setInterval(loadUsers, 3000);
+            loadUsers();
+        }
+
+        function loadMessages() {
+            fetch(`${API_URL}/api/messages?user=${encodeURIComponent(username)}&since=${encodeURIComponent(lastMessageTime)}`)
+                .then(r => r.json())
+                .then(data => {
+                    data.messages.forEach(msg => {
+                        displayMessage(msg);
+                        if (msg.timestamp > lastMessageTime) {
+                            lastMessageTime = msg.timestamp;
+                        }
+                    });
+                });
+        }
+
+        function loadUsers() {
+            fetch(`${API_URL}/api/users`)
+                .then(r => r.json())
+                .then(data => {
+                    document.getElementById('onlineCount').textContent = `Онлайн: ${data.users.length}`;
+                    
+                    // Update user list
+                    let html = `
+                        <div class="chat-item ${currentChat === 'all' ? 'active' : ''}" onclick="selectChat('all')">
+                            <div class="name">📢 Общий чат</div>
+                            <div class="preview">Все сообщения</div>
+                        </div>
+                    `;
+                    
+                    data.users.forEach(user => {
+                        if (user !== username) {
+                            html += `
+                                <div class="chat-item ${currentChat === user ? 'active' : ''}" onclick="selectChat('${user}')">
+                                    <div class="name">👤 ${escapeHtml(user)}</div>
+                                    <div class="preview">Личное сообщение</div>
+                                </div>
+                            `;
+                        }
+                    });
+                    
+                    document.getElementById('chatList').innerHTML = html;
+                });
+            
+            // Keepalive
+            fetch(`${API_URL}/api/poll?user=${encodeURIComponent(username)}`);
+        }
+
+        function displayMessage(msg) {
+            const isOutgoing = msg.sender === username;
+            const div = document.createElement('div');
+            div.className = `message ${isOutgoing ? 'outgoing' : 'incoming'}`;
+            
+            const time = new Date(msg.timestamp).toLocaleTimeString('ru-RU', {hour: '2-digit', minute:'2-digit'});
+            
+            div.innerHTML = `
+                ${!isOutgoing ? `<div class="sender">${escapeHtml(msg.sender)}</div>` : ''}
+                <div class="text">${escapeHtml(msg.content)}</div>
+                <div class="time">${time}</div>
+            `;
+            
+            document.getElementById('messages').appendChild(div);
+            document.getElementById('messages').scrollTop = document.getElementById('messages').scrollHeight;
+        }
+
+        function sendMessage() {
+            const input = document.getElementById('messageInput');
+            const content = input.value.trim();
+            if (!content) return;
+            
+            fetch(`${API_URL}/api/send`, {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({
+                    sender: username,
+                    recipient: currentChat,
+                    content: content
+                })
+            }).then(() => {
+                input.value = '';
+                loadMessages();
+            });
+        }
+
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+
+        document.getElementById('usernameInput').addEventListener('keypress', (e) => {
+            if (e.key === 'Enter') login();
+        });
+    </script>
+</body>
+</html>
