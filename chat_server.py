@@ -92,6 +92,7 @@ def generate_captcha():
     return question, str(answer)
 
 captcha_challenges = {}
+captcha_attempts = {}  # Track failed attempts per IP/email
 
 def create_otp(email):
     otp = generate_otp()
@@ -272,20 +273,35 @@ class ChatHandler(http.server.BaseHTTPRequestHandler):
         elif path == '/api/auth/create-user-with-otp':
             email = data.get('email', '').lower().strip()
             captcha_id = data.get('captcha_id', '')
-            captcha_answer = data.get('captcha_answer', '')
+            captcha_answer = data.get('captcha_answer', '').strip()
             
             if not email:
                 self.send_error(400)
                 return
             
+            # Check attempt limits
+            client_ip = self.client_address[0]
+            if client_ip in captcha_attempts and captcha_attempts[client_ip] >= 5:
+                self.send_json({'success': False, 'error': 'Слишком много попыток. Подождите 5 минут.'})
+                return
+            
             # Verify captcha
             if captcha_id and captcha_id in captcha_challenges:
                 if captcha_challenges[captcha_id] != captcha_answer:
-                    self.send_json({'success': False, 'error': 'Неверный ответ на капчу'})
+                    captcha_attempts[client_ip] = captcha_attempts.get(client_ip, 0) + 1
+                    remaining = 5 - captcha_attempts[client_ip]
+                    self.send_json({'success': False, 'error': f'Неверный ответ. Осталось попыток: {remaining}'})
                     return
                 del captcha_challenges[captcha_id]
+                if client_ip in captcha_attempts:
+                    del captcha_attempts[client_ip]
             else:
-                self.send_json({'success': False, 'error': 'Капча обязательна'})
+                self.send_json({'success': False, 'error': 'Капча обязательна. Обновите страницу.'})
+                return
+            
+            # Validate email format
+            if '@' not in email or '.' not in email.split('@')[1]:
+                self.send_json({'success': False, 'error': 'Некорректный email'})
                 return
             
             otp, email_sent = create_otp(email)
@@ -294,7 +310,7 @@ class ChatHandler(http.server.BaseHTTPRequestHandler):
                 message = 'Код отправлен на email'
                 show_otp = False
             else:
-                message = 'SMTP не настроен. Код в консоли'
+                message = 'SMTP не настроен'
                 show_otp = True
             
             self.send_json({'success': True, 'message': message, 'otp': otp if show_otp else None, 'userId': email, 'email_sent': email_sent})
