@@ -8,7 +8,8 @@ import sys
 import sqlite3
 import threading
 import time
-from datetime import datetime
+import random
+from datetime import datetime, timedelta
 from urllib.parse import parse_qs, urlparse
 
 PORT = 9000
@@ -19,13 +20,48 @@ def init_db():
     conn = sqlite3.connect(DB_PATH, check_same_thread=False)
     conn.execute('''CREATE TABLE IF NOT EXISTS messages
                     (id INTEGER PRIMARY KEY AUTOINCREMENT,
-                     sender TEXT, recipient TEXT, content TEXT, timestamp TEXT)''')
+                     sender TEXT, recipient TEXT, content TEXT, timestamp TEXT,
+                     read INTEGER DEFAULT 0)''')
+    conn.execute('''CREATE TABLE IF NOT EXISTS users
+                    (username TEXT PRIMARY KEY, avatar_color TEXT, online INTEGER DEFAULT 0)''')
+    conn.execute('''CREATE TABLE IF NOT EXISTS otp_codes
+                    (email TEXT PRIMARY KEY, otp TEXT, expires_at TEXT, verified INTEGER DEFAULT 0)''')
     conn.commit()
     return conn
 
 db = init_db()
 active_users = {}
 users_lock = threading.Lock()
+
+def generate_otp():
+    return ''.join([str(random.randint(0, 9)) for _ in range(6)])
+
+def create_otp(email):
+    otp = generate_otp()
+    expires_at = (datetime.now() + timedelta(minutes=10)).isoformat()
+    db.execute("INSERT OR REPLACE INTO otp_codes (email, otp, expires_at, verified) VALUES (?, ?, ?, 0)",
+               (email, otp, expires_at))
+    db.commit()
+    return otp
+
+def verify_otp(email, otp):
+    row = db.execute("SELECT otp, expires_at, verified FROM otp_codes WHERE email=?", (email,)).fetchone()
+    if not row:
+        return False, "OTP not found"
+    
+    stored_otp, expires_at, verified = row
+    if verified:
+        return False, "Already verified"
+    
+    if datetime.now() > datetime.fromisoformat(expires_at):
+        return False, "OTP expired"
+    
+    if stored_otp != otp:
+        return False, "Invalid OTP"
+    
+    db.execute("UPDATE otp_codes SET verified=1 WHERE email=?", (email,))
+    db.commit()
+    return True, "Verified"
 
 class ChatHandler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
@@ -78,25 +114,54 @@ class ChatHandler(http.server.BaseHTTPRequestHandler):
             user = query.get('user', [''])[0]
             since = query.get('since', ['1970-01-01'])[0]
             rows = db.execute(
-                """SELECT id, sender, recipient, content, timestamp 
+                """SELECT id, sender, recipient, content, timestamp, read
                    FROM messages 
                    WHERE (recipient='all' OR recipient=? OR sender=?) AND timestamp > ?
                    ORDER BY timestamp ASC""", (user, user, since)).fetchall()
-            msgs = [{'id':r[0],'sender':r[1],'recipient':r[2],'content':r[3],'timestamp':r[4]} for r in rows]
+            msgs = [{'id':r[0],'sender':r[1],'recipient':r[2],'content':r[3],'timestamp':r[4],'read':r[5]} for r in rows]
             self.send_json({'messages': msgs})
+        
+        elif path == '/api/unread':
+            user = query.get('user', [''])[0]
+            rows = db.execute(
+                """SELECT COUNT(*) FROM messages 
+                   WHERE recipient=? AND read=0""", (user,)).fetchone()
+            unread_count = rows[0] if rows else 0
+            self.send_json({'unread': unread_count})
         
         elif path == '/api/users':
             with users_lock:
                 now = time.time()
                 dead = [u for u,t in active_users.items() if now-t > 300]
-                for u in dead: del active_users[u]
-                self.send_json({'users': list(active_users.keys())})
+                for u in dead: 
+                    del active_users[u]
+                    db.execute("UPDATE users SET online=0 WHERE username=?", (u,))
+                    db.commit()
+                
+                users = []
+                for username in active_users.keys():
+                    user_row = db.execute("SELECT avatar_color FROM users WHERE username=?", (username,)).fetchone()
+                    color = user_row[0] if user_row else None
+                    users.append({'username': username, 'avatar_color': color, 'online': True})
+                
+                self.send_json({'users': users})
+        
+        elif path == '/api/user-info':
+            username = query.get('username', [''])[0]
+            user_row = db.execute("SELECT avatar_color, online FROM users WHERE username=?", (username,)).fetchone()
+            if user_row:
+                self.send_json({'username': username, 'avatar_color': user_row[0], 'online': user_row[1]})
+            else:
+                self.send_json({'username': username, 'avatar_color': None, 'online': False})
         
         elif path == '/api/poll':
             user = query.get('user', [''])[0]
             if user:
                 with users_lock:
                     active_users[user] = time.time()
+                    db.execute("INSERT OR IGNORE INTO users (username, online) VALUES (?, 1)", (user,))
+                    db.execute("UPDATE users SET online=1 WHERE username=?", (user,))
+                    db.commit()
             self.send_json({'status': 'ok'})
         
         else:
@@ -119,6 +184,53 @@ class ChatHandler(http.server.BaseHTTPRequestHandler):
                            (data.get('sender'), data.get('recipient','all'), data.get('content',''), ts))
             db.commit()
             self.send_json({'success': True, 'timestamp': ts, 'id': c.lastrowid})
+        
+        elif path == '/api/mark-read':
+            user = data.get('user', '')
+            if user:
+                db.execute("UPDATE messages SET read=1 WHERE recipient=? AND read=0", (user,))
+                db.commit()
+                self.send_json({'success': True})
+            else:
+                self.send_error(400)
+        
+        elif path == '/api/auth/create-user-with-otp':
+            email = data.get('email', '').lower().strip()
+            if not email:
+                self.send_error(400)
+                return
+            
+            otp = create_otp(email)
+            print(f"🔧 DEV MODE: OTP for {email}: {otp}")
+            self.send_json({'success': True, 'message': 'OTP sent', 'otp': otp, 'userId': email})
+        
+        elif path == '/api/auth/verify-otp':
+            email = data.get('userId', '')
+            otp = data.get('otp', '')
+            if not email or not otp:
+                self.send_error(400)
+                return
+            
+            success, message = verify_otp(email, otp)
+            if success:
+                # Create user account
+                username = email.split('@')[0]
+                colors = [
+                    'linear-gradient(145deg, #ff7b7b, #c94b4b)',
+                    'linear-gradient(145deg, #6bcb77, #2e8b57)',
+                    'linear-gradient(145deg, #4dabf7, #1a73e8)',
+                    'linear-gradient(145deg, #ffd43b, #fab005)',
+                    'linear-gradient(145deg, #da77f2, #be4bdb)',
+                    'linear-gradient(145deg, #ff8787, #e03131)'
+                ]
+                hash_val = sum(ord(c) for c in username)
+                color = colors[hash_val % len(colors)]
+                db.execute("INSERT OR IGNORE INTO users (username, avatar_color, online) VALUES (?, ?, 1)",
+                          (username, color))
+                db.commit()
+                self.send_json({'success': True, 'message': 'Verified', 'userId': username, 'email': email})
+            else:
+                self.send_json({'success': False, 'error': message})
         
         else:
             self.send_error(404)
