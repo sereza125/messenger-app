@@ -679,11 +679,11 @@
             <h1><i class="fas fa-comment-dots"></i> Messenger</h1>
             <input type="email" id="emailInput" placeholder="Email" maxlength="50">
             <br>
-            <div class="turnstile-container">
-                <label style="color:#7a8b9a;font-size:14px;display:flex;align-items:center;gap:8px;cursor:pointer;">
-                    <input type="checkbox" id="turnstileCheckbox" class="turnstile-checkbox">
-                    Я не робот
-                </label>
+            <div class="turnstile-container" id="captchaContainer">
+                <div style="color:#7a8b9a;font-size:14px;margin-bottom:8px;">Защита от ботов:</div>
+                <div id="captchaQuestion" style="color:#fff;font-size:18px;font-weight:600;margin-bottom:8px;"></div>
+                <input type="text" id="captchaAnswer" placeholder="Ответ" maxlength="10" style="width:100%;padding:12px;background:rgba(0,0,0,0.3);border:1px solid rgba(255,255,255,0.05);border-radius:20px;color:#fff;font-size:14px;outline:none;">
+                <button onclick="generateCaptcha()" style="width:100%;padding:10px;background:rgba(95,95,236,0.3);border:1px solid rgba(95,95,236,0.5);border-radius:15px;color:#fff;font-size:14px;cursor:pointer;margin-top:8px;">Обновить капчу</button>
             </div>
             <button onclick="requestOTP()">Получить код</button>
             <div id="otpMessage" class="otp-message"></div>
@@ -788,6 +788,7 @@
         let usersInterval;
         let allUsers = [];
         let currentEmail = null;
+        let currentCaptchaId = null;
         
         // WebRTC variables
         let localStream = null;
@@ -806,6 +807,19 @@
             ]
         };
 
+        function generateCaptcha() {
+            fetch(`${API_URL}/api/captcha`)
+                .then(r => r.json())
+                .then(data => {
+                    currentCaptchaId = data.captcha_id;
+                    document.getElementById('captchaQuestion').textContent = data.question;
+                    document.getElementById('captchaAnswer').value = '';
+                });
+        }
+
+        // Generate captcha on page load
+        generateCaptcha();
+
         function toggleSidebar() {
             document.getElementById('sidebar').classList.toggle('open');
         }
@@ -823,8 +837,8 @@
             if (!email) return alert('Введите email!');
             if (!email.includes('@')) return alert('Некорректный email!');
             
-            const turnstileChecked = document.getElementById('turnstileCheckbox').checked;
-            if (!turnstileChecked) return alert('Подтвердите, что вы не робот!');
+            const captchaAnswer = document.getElementById('captchaAnswer').value.trim();
+            if (!captchaAnswer) return alert('Решите капчу!');
             
             currentEmail = email;
             const msgEl = document.getElementById('otpMessage');
@@ -835,7 +849,11 @@
             fetch(`${API_URL}/api/auth/create-user-with-otp`, {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({email})
+                body: JSON.stringify({
+                    email,
+                    captcha_id: currentCaptchaId,
+                    captcha_answer: captchaAnswer
+                })
             }).then(r => r.json())
             .then(data => {
                 if (data.success) {
@@ -849,10 +867,12 @@
                 } else {
                     msgEl.className = 'otp-message error';
                     msgEl.textContent = data.error || 'Ошибка';
+                    generateCaptcha();
                 }
             }).catch(err => {
                 msgEl.className = 'otp-message error';
                 msgEl.textContent = 'Ошибка соединения';
+                generateCaptcha();
             });
         }
 

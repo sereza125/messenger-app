@@ -9,12 +9,43 @@ import sqlite3
 import threading
 import time
 import random
+import smtplib
+from email.mime.text import MIMEText
 from datetime import datetime, timedelta
 from urllib.parse import parse_qs, urlparse
 
 PORT = 9000
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.path.join(BASE_DIR, 'chat.db')
+
+# SMTP Configuration (use Gmail or any SMTP server)
+SMTP_SERVER = 'smtp.gmail.com'
+SMTP_PORT = 587
+SMTP_EMAIL = ''  # Set your email
+SMTP_PASSWORD = ''  # Set your app password
+
+def send_otp_email(email, otp):
+    if not SMTP_EMAIL or not SMTP_PASSWORD:
+        print(f"SMTP not configured. OTP for {email}: {otp}")
+        return False
+    
+    try:
+        msg = MIMEText(f'Ваш код подтверждения: {otp}\n\nКод действителен 10 минут.')
+        msg['Subject'] = 'Код подтверждения Messenger'
+        msg['From'] = SMTP_EMAIL
+        msg['To'] = email
+        
+        with smtplib.SMTP(SMTP_SERVER, SMTP_PORT) as server:
+            server.starttls()
+            server.login(SMTP_EMAIL, SMTP_PASSWORD)
+            server.send_message(msg)
+        
+        print(f"OTP sent to {email}: {otp}")
+        return True
+    except Exception as e:
+        print(f"SMTP error: {e}")
+        print(f"DEV MODE: OTP for {email}: {otp}")
+        return False
 
 def init_db():
     conn = sqlite3.connect(DB_PATH, check_same_thread=False)
@@ -39,13 +70,40 @@ users_lock = threading.Lock()
 def generate_otp():
     return ''.join([str(random.randint(0, 9)) for _ in range(6)])
 
+def generate_captcha():
+    """Generate math captcha question and answer"""
+    operations = ['+', '-', '*']
+    op = random.choice(operations)
+    
+    if op == '+':
+        a = random.randint(1, 50)
+        b = random.randint(1, 50)
+        answer = a + b
+    elif op == '-':
+        a = random.randint(10, 50)
+        b = random.randint(1, a)
+        answer = a - b
+    else:  # *
+        a = random.randint(2, 10)
+        b = random.randint(2, 10)
+        answer = a * b
+    
+    question = f"{a} {op} {b} = ?"
+    return question, str(answer)
+
+captcha_challenges = {}
+
 def create_otp(email):
     otp = generate_otp()
     expires_at = (datetime.now() + timedelta(minutes=10)).isoformat()
     db.execute("INSERT OR REPLACE INTO otp_codes (email, otp, expires_at, verified) VALUES (?, ?, ?, 0)",
                (email, otp, expires_at))
     db.commit()
-    return otp
+    
+    # Send email via SMTP
+    email_sent = send_otp_email(email, otp)
+    
+    return otp, email_sent
 
 def verify_otp(email, otp):
     row = db.execute("SELECT otp, expires_at, verified FROM otp_codes WHERE email=?", (email,)).fetchone()
@@ -132,6 +190,13 @@ class ChatHandler(http.server.BaseHTTPRequestHandler):
             unread_count = rows[0] if rows else 0
             self.send_json({'unread': unread_count})
         
+        elif path == '/api/captcha':
+            import uuid
+            captcha_id = str(uuid.uuid4())
+            question, answer = generate_captcha()
+            captcha_challenges[captcha_id] = answer
+            self.send_json({'captcha_id': captcha_id, 'question': question})
+        
         elif path == '/api/users':
             with users_lock:
                 now = time.time()
@@ -197,15 +262,42 @@ class ChatHandler(http.server.BaseHTTPRequestHandler):
             else:
                 self.send_error(400)
         
+        elif path == '/api/captcha':
+            import uuid
+            captcha_id = str(uuid.uuid4())
+            question, answer = generate_captcha()
+            captcha_challenges[captcha_id] = answer
+            self.send_json({'captcha_id': captcha_id, 'question': question})
+        
         elif path == '/api/auth/create-user-with-otp':
             email = data.get('email', '').lower().strip()
+            captcha_id = data.get('captcha_id', '')
+            captcha_answer = data.get('captcha_answer', '')
+            
             if not email:
                 self.send_error(400)
                 return
             
-            otp = create_otp(email)
-            print(f"🔧 DEV MODE: OTP for {email}: {otp}")
-            self.send_json({'success': True, 'message': 'OTP sent', 'otp': otp, 'userId': email})
+            # Verify captcha
+            if captcha_id and captcha_id in captcha_challenges:
+                if captcha_challenges[captcha_id] != captcha_answer:
+                    self.send_json({'success': False, 'error': 'Неверный ответ на капчу'})
+                    return
+                del captcha_challenges[captcha_id]
+            else:
+                self.send_json({'success': False, 'error': 'Капча обязательна'})
+                return
+            
+            otp, email_sent = create_otp(email)
+            
+            if email_sent:
+                message = 'Код отправлен на email'
+                show_otp = False
+            else:
+                message = 'SMTP не настроен. Код в консоли'
+                show_otp = True
+            
+            self.send_json({'success': True, 'message': message, 'otp': otp if show_otp else None, 'userId': email, 'email_sent': email_sent})
         
         elif path == '/api/auth/verify-otp':
             email = data.get('userId', '')
